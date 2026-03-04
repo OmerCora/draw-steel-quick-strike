@@ -1578,13 +1578,19 @@ async function applyStatusWithLogging({
     return { success: false, error: "Actor not found" };
   }
 
+  // Handle custom Active Effects from Draw Steel 0.10.x (UUID-based)
+  // These effects use data-uuid instead of data-status in enricher links
   if (effectUuid) {
     try {
       const effectDoc = await fromUuid(effectUuid);
-      if (effectDoc && typeof effectDoc.applyEffect === 'function') {
+      // Validate that resolved document is an ActiveEffect with applyEffect method
+      // This ensures we only apply valid Draw Steel custom effects
+      if (effectDoc && effectDoc.documentName === 'ActiveEffect' && typeof effectDoc.applyEffect === 'function') {
         const tier = effectDoc.tier || effectDoc.parent?.tier || 3;
         const tierKey = `tier${tier}`;
         
+        // For custom effects, statusId may be undefined - handle gracefully
+        // Pass statusId as-is; Draw Steel's applyEffect should handle undefined appropriately
         await effectDoc.applyEffect(tierKey, statusId, { targets: [actor] });
         
         const generatedEventId = eventId || `status-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -1626,16 +1632,29 @@ async function applyStatusWithLogging({
         });
         
         return { success: true, statusName: statusName };
+      } else if (effectDoc) {
+        // Document resolved but is not a valid ActiveEffect - fall back immediately
+        // This handles cases where UUID points to non-ActiveEffect documents
+        console.debug(`${MODULE_ID}: Resolved UUID points to non-ActiveEffect document, falling back to status ID`);
       }
     } catch (nativeError) {
-      console.warn(`${MODULE_ID}: Native applyEffect failed, falling back:`, nativeError.message);
+      // UUID resolution or applyEffect failed - use debug logging to avoid console spam
+      // Fall back to standard status effect logic if statusId is available
+      console.debug(`${MODULE_ID}: UUID resolution or applyEffect failed, falling back:`, nativeError.message);
     }
+  }
+
+  // Handle case where neither UUID nor status ID are available
+  // This prevents the "Status undefined not found" error for custom effects
+  if (!statusId) {
+    console.debug(`${MODULE_ID}: No status identifier provided (neither UUID nor status ID)`);
+    return { success: false, error: "No status effect identifier provided" };
   }
 
   const existingStatus = CONFIG.statusEffects.find(e => e.id === statusId);
 
   if (!existingStatus) {
-    console.error(`${MODULE_ID}: Status "${statusId}" not found in CONFIG.statusEffects`);
+    console.debug(`${MODULE_ID}: Status "${statusId}" not found in CONFIG.statusEffects`);
     return { success: false, error: `Status ${statusId} not found` };
   }
 
