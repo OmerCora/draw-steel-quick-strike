@@ -1228,12 +1228,18 @@ async function handleEnricherApplyClick(link, tokens) {
     return;
   }
   
+  // Validate that we have at least one identifier
+  if (!statusId && !effectUuid) {
+    ui.notifications.error("Unable to apply status: no identifier found");
+    return;
+  }
+  
   for (const token of tokens) {
     const result = await socket.executeAsGM("applyStatusToTarget", {
       tokenId: token.id,
       statusName,
       statusId,
-      statusUuid: effectUuid,
+      effectUuid: effectUuid,
       sourceActorId: null,
       sourceItemId: null,
       sourceItemName: statusName,
@@ -1516,53 +1522,10 @@ async function handleGMUndoDamage({ targetTokenId, originalPerm, originalTemp, t
  * GM handler – Apply a Draw Steel status condition to a target
  */
 async function handleGMApplyStatus({
+  token,
   tokenId,
   statusName,
   statusId,
-  statusUuid,
-  sourceActorId,
-  sourceItemId,
-  sourceItemName,
-  sourcePlayerName,
-  ability = null,
-  timestamp,
-  eventId = null,
-  duration = null
-}) {
-  if (!game.user.isGM) {
-    return { success: false, error: "Unauthorized" };
-  }
-
-  try {
-    const token = canvas.tokens.get(tokenId);
-    if (!token) {
-      return { success: false, error: "Token not found" };
-    }
-
-    return await applyStatusWithLogging({
-      token,
-      statusId,
-      statusName,
-      effectUuid: statusUuid,
-      sourceActorId,
-      sourceItemId,
-      sourceItemName,
-      sourcePlayerName,
-      ability,
-      duration,
-      eventId,
-      timestamp
-    });
-  } catch (error) {
-    console.error(`${MODULE_ID}: GM apply status error`, error);
-    return { success: false, error: error.message };
-  }
-}
-
-async function applyStatusWithLogging({
-  token,
-  statusId,
-  statusName,
   effectUuid,
   sourceActorId,
   sourceItemId,
@@ -1573,7 +1536,24 @@ async function applyStatusWithLogging({
   eventId = null,
   timestamp = null
 }) {
-  const actor = token.actor;
+  // Handle both direct calls (token object) and socket calls (tokenId)
+  let actualToken = token;
+  if (!actualToken && tokenId) {
+    actualToken = canvas.tokens.get(tokenId);
+  }
+  
+  
+  
+  if (!game.user.isGM) {
+    ui.notifications.error("Only GM can apply status via socket");
+    return { success: false, error: "GM only" };
+  }
+
+  if (!actualToken) {
+    return { success: false, error: "Token not found" };
+  }
+  
+  const actor = actualToken.actor;
   if (!actor) {
     return { success: false, error: "Actor not found" };
   }
@@ -1581,17 +1561,26 @@ async function applyStatusWithLogging({
   // Handle custom Active Effects from Draw Steel 0.10.x (UUID-based)
   // These effects use data-uuid instead of data-status in enricher links
   if (effectUuid) {
+    // Validate UUID format - should contain dots and not be empty
+    if (!effectUuid || typeof effectUuid !== 'string' || !effectUuid.includes('.')) {
+      return { success: false, error: `Invalid effect UUID format: "${effectUuid}"` };
+    }
+    
     try {
       const effectDoc = await fromUuid(effectUuid);
-      // Validate that resolved document is an ActiveEffect with applyEffect method
-      // This ensures we only apply valid Draw Steel custom effects
-      if (effectDoc && effectDoc.documentName === 'ActiveEffect' && typeof effectDoc.applyEffect === 'function') {
-        const tier = effectDoc.tier || effectDoc.parent?.tier || 3;
-        const tierKey = `tier${tier}`;
+      // Validate that resolved document is an ActiveEffect
+      // Draw Steel custom effects use standard Foundry ActiveEffect creation
+      const isValidEffect = effectDoc && 
+        (effectDoc.documentName === 'ActiveEffect' || effectDoc instanceof ActiveEffect);
+      
+      if (isValidEffect) {
+        // Clone the effect to create a temporary instance (like Draw Steel's native enricher)
+        // This preserves all effect properties including duration, flags, etc.
+        const tempEffect = effectDoc.clone({}, { keepId: false });
+        const effectData = tempEffect.toObject();
         
-        // For custom effects, statusId may be undefined - handle gracefully
-        // Pass statusId as-is; Draw Steel's applyEffect should handle undefined appropriately
-        await effectDoc.applyEffect(tierKey, statusId, { targets: [actor] });
+        // Apply the effect to the actor using standard Foundry method
+        await actor.createEmbeddedDocuments("ActiveEffect", [effectData]);
         
         const generatedEventId = eventId || `status-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         
@@ -1600,9 +1589,9 @@ async function applyStatusWithLogging({
           statusName: statusName,
           statusId: statusId,
           statusUuid: effectUuid,
-          targetName: actor.name,
-          targetTokenId: token.id,
-          targetActorId: actor.id,
+          targetName: actor?.name || "Unknown",
+          targetTokenId: token?.id || null,
+          targetActorId: actor?.id || null,
           sourceActorId: sourceActorId,
           sourceActorName: sourcePlayerName ?? "Unknown",
           sourceItemId: sourceItemId,
@@ -1616,8 +1605,8 @@ async function applyStatusWithLogging({
         });
         
         Hooks.callAll("ds-quick-strikeStatusApplied", {
-          actorId: actor.id,
-          tokenId: token.id,
+          actorId: actor?.id || null,
+          tokenId: token?.id || null,
           statusName: statusName,
           statusId: statusId,
           statusUuid: effectUuid,
@@ -1632,29 +1621,89 @@ async function applyStatusWithLogging({
         });
         
         return { success: true, statusName: statusName };
-      } else if (effectDoc) {
-        // Document resolved but is not a valid ActiveEffect - fall back immediately
-        // This handles cases where UUID points to non-ActiveEffect documents
-        console.debug(`${MODULE_ID}: Resolved UUID points to non-ActiveEffect document, falling back to status ID`);
+      } else {
+        // Document resolved but is not a valid ActiveEffect, or UUID resolution failed
+        // Try alternative approach: extract effect ID and find it on actor's items
+        
+        // Extract effect ID from UUID (last part after last dot)
+        const effectIdFromUuid = effectUuid.split('.').pop();
+        if (effectIdFromUuid) {
+          // Search through actor's items for an effect with this ID
+          for (const item of actor.items) {
+            const effect = item.effects.find(e => e.id === effectIdFromUuid);
+            if (effect && typeof effect.applyEffect === 'function') {
+              const tier = effect.tier || item.system?.tier || 3;
+              const tierKey = `tier${tier}`;
+              
+              await effect.applyEffect(tierKey, statusId, { targets: [actor] });
+              
+              const generatedEventId = eventId || `status-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+              
+              await logStatusToChat({
+                type: "apply",
+                statusName: statusName,
+                statusId: statusId,
+                statusUuid: effectUuid,
+                targetName: actor.name,
+                targetTokenId: token.id,
+                targetActorId: actor.id,
+                sourceActorId: sourceActorId,
+                sourceActorName: sourcePlayerName ?? "Unknown",
+                sourceItemId: sourceItemId,
+                sourceItemName: sourceItemName,
+                sourcePlayerName: sourcePlayerName,
+                source: game.user.isGM ? "direct" : "socket",
+                effectId: null,
+                eventId: generatedEventId,
+                timestamp: timestamp || Date.now(),
+                duration: duration
+              });
+              
+              Hooks.callAll("ds-quick-strikeStatusApplied", {
+                actorId: actor.id,
+                tokenId: token.id,
+                statusName: statusName,
+                statusId: statusId,
+                statusUuid: effectUuid,
+                effectId: null,
+                sourceActorId: sourceActorId,
+                sourceItemId: sourceItemId,
+                sourceItemName: sourceItemName,
+                sourcePlayerName: sourcePlayerName,
+                ability: ability,
+                eventId: generatedEventId,
+                timestamp: timestamp || Date.now()
+              });
+              
+              return { success: true, statusName: statusName };
+            }
+          }
+        }
+        
+        return { success: false, error: `Custom effect UUID "${effectUuid}" could not be resolved` };
       }
     } catch (nativeError) {
-      // UUID resolution or applyEffect failed - use debug logging to avoid console spam
-      // Fall back to standard status effect logic if statusId is available
-      console.debug(`${MODULE_ID}: UUID resolution or applyEffect failed, falling back:`, nativeError.message);
+      // UUID resolution or applyEffect failed
+      // For UUID-based effects, we cannot fall back to statusId logic
+      return { success: false, error: `Failed to apply custom effect: ${nativeError.message || nativeError}` };
     }
   }
 
   // Handle case where neither UUID nor status ID are available
   // This prevents the "Status undefined not found" error for custom effects
-  if (!statusId) {
-    console.debug(`${MODULE_ID}: No status identifier provided (neither UUID nor status ID)`);
+  if (!statusId && !effectUuid) {
     return { success: false, error: "No status effect identifier provided" };
+  }
+  
+  // If we have a statusId but no effectUuid, proceed with standard status logic
+  // This handles cases where statusId might be undefined but we still want to try
+  if (!effectUuid && statusId === undefined) {
+    return { success: false, error: "Status identifier is undefined" };
   }
 
   const existingStatus = CONFIG.statusEffects.find(e => e.id === statusId);
 
   if (!existingStatus) {
-    console.debug(`${MODULE_ID}: Status "${statusId}" not found in CONFIG.statusEffects`);
     return { success: false, error: `Status ${statusId} not found` };
   }
 
