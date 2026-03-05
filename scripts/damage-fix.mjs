@@ -140,7 +140,7 @@ function installApplyEffectOverride() {
       const eventId = `status-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
       
       for (const token of targetTokens) {
-        await applyStatusWithLogging({
+        await handleGMApplyStatus({
           token,
           statusId,
           statusName,
@@ -1269,7 +1269,7 @@ async function handleEnricherApplyClickDirect(link, tokens) {
   const duration = end ? { type: 'draw-steel', label: end, end: { type: end } } : null;
   
   for (const token of tokens) {
-    const result = await applyStatusWithLogging({
+    const result = await handleGMApplyStatus({
       token,
       statusId,
       statusName,
