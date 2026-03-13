@@ -89,7 +89,12 @@ Hooks.once('ready', () => {
  * Override Draw Steel 0.10.0 applyEffect action to route through GM relay
  */
 function installApplyEffectOverride() {
-  const AbilityResultPart = globalThis.ds?.data?.pseudoDocuments?.messageParts?.AbilityResult;
+  // Try 0.11.x path first
+  let AbilityResultPart = ds?.data?.pseudoDocuments?.messageParts?.AbilityResult;
+  // Fallback to 0.10.x
+  if (!AbilityResultPart) {
+    AbilityResultPart = globalThis.ds?.data?.pseudoDocuments?.messageParts?.AbilityResultPart;
+  }
   if (!AbilityResultPart) {
     return;
   }
@@ -1307,38 +1312,27 @@ Hooks.once("ready", () => {
     if (!statusBtn && !statusLink) return;
     
     if (statusLink) {
+      // 0.11.x uses canvas.tokens.controlled, 0.10.x uses game.user.targets
+      // Check controlled tokens first (0.11.x behavior), fallback to targets (0.10.x)
+      const controlledTokens = Array.from(canvas?.tokens?.controlled ?? []);
       const targets = Array.from(game.user.targets);
-      const controlledTokens = canvas?.tokens?.controlled ?? [];
       
-      // Draw Steel's native enricher handler uses CONTROLLED tokens, not TARGETS
-      // If user has targets, we must intercept because native handler ignores them
+      // Prefer controlled tokens (0.11.x), fallback to targets (0.10.x)
+      const tokensToUse = controlledTokens.length > 0 ? controlledTokens : targets;
       
-      if (targets.length > 0) {
-        const unownedTargets = targets.filter(t => !t.actor?.isOwner);
-        
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
-        
-        if (game.user.isGM || unownedTargets.length === 0) {
-          await handleEnricherApplyClickDirect(statusLink, targets);
-        } else {
-          await handleEnricherApplyClick(statusLink, unownedTargets);
-        }
-        return;
-      }
+      if (tokensToUse.length === 0) return;
       
-      if (controlledTokens.length === 0) return;
-      
-      const unownedTokens = controlledTokens.filter(t => !t.actor?.isOwner);
-      
-      if (game.user.isGM || unownedTokens.length === 0) return;
+      const unownedTokens = tokensToUse.filter(t => !t.actor?.isOwner);
       
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
       
-      await handleEnricherApplyClick(statusLink, unownedTokens);
+      if (game.user.isGM || unownedTokens.length === 0) {
+        await handleEnricherApplyClickDirect(statusLink, tokensToUse);
+      } else {
+        await handleEnricherApplyClick(statusLink, unownedTokens);
+      }
       return;
     }
     
@@ -1604,7 +1598,7 @@ async function handleGMApplyStatus({
           duration: duration
         });
         
-        Hooks.callAll("ds-quick-strikeStatusApplied", {
+        Hooks.callAll("ds-quick-strike:statusApplied", {
           actorId: actor?.id || null,
           tokenId: token?.id || null,
           statusName: statusName,
@@ -1659,7 +1653,7 @@ async function handleGMApplyStatus({
                 duration: duration
               });
               
-              Hooks.callAll("ds-quick-strikeStatusApplied", {
+              Hooks.callAll("ds-quick-strike:statusApplied", {
                 actorId: actor.id,
                 tokenId: token.id,
                 statusName: statusName,
@@ -1759,7 +1753,7 @@ async function handleGMApplyStatus({
     duration: duration
   });
 
-  Hooks.callAll("ds-quick-strikeStatusApplied", {
+  Hooks.callAll("ds-quick-strike:statusApplied", {
     actorId: actor.id,
     tokenId: token.id,
     statusName: statusName,
