@@ -108,7 +108,7 @@ function installApplyEffectOverride() {
     event.preventDefault();
     event.stopPropagation();
 
-    const statusId = target.dataset.status || target.dataset.effectId;
+    const statusId = target.dataset.effectId;
     const effectUuid = target.dataset.uuid;
     const statusName = target.textContent.trim();
 
@@ -176,10 +176,7 @@ function installApplyEffectOverride() {
     for (const token of unownedTokens) {
       const abilityData = await extractAbilityDataFromMessage(message);
       
-      console.log(`[ds-quick-strike] Player-side: About to call socket for token=${token.id}, statusId=${statusId}, statusName=${statusName}, effectUuid=${effectUuid}`);
-      console.log(`[ds-quick-strike] Player-side: target.dataset =`, target.dataset);
-      
-      const socketData = {
+      const result = await socket.executeAsGM("applyStatusToTarget", {
         tokenId: token.id,
         statusName,
         statusId,
@@ -191,13 +188,7 @@ function installApplyEffectOverride() {
         ability: abilityData?.ability || null,
         timestamp: Date.now(),
         duration: abilityData?.duration || null
-      };
-      
-      console.log(`[ds-quick-strike] Player-side: Socket data being sent:`, socketData);
-      
-      const result = await socket.executeAsGM("applyStatusToTarget", socketData);
-
-      console.log(`[ds-quick-strike] Player-side: Socket result:`, result);
+      });
 
       if (result?.success) {
         ui.notifications.info(`Applied ${statusName} to ${token.name}`);
@@ -927,23 +918,18 @@ async function logStatusToChat(entry) {
 async function extractAbilityDataFromMessage(message) {
   try {
     let sourceActorId = null;
-    let sourceActor = null;
 
     if (message.author?.character) {
-      sourceActor = message.author.character;
-      sourceActorId = sourceActor.id;
+      sourceActorId = message.author.character.id;
     } else if (message.author?.isGM && game.user.character) {
-      sourceActor = game.user.character;
-      sourceActorId = sourceActor.id;
+      sourceActorId = game.user.character.id;
     }
 
-    // Extract ability name and duration from chat message content
     let abilityName = 'Unknown Ability';
     let durationInfo = null;
     let sourcePlayerName = message.author?.name || 'Unknown';
 
-    // Get the message content element using multiple methods
-    let messageElement = ui.chat.collection.get(message.id)?.element;
+    const messageElement = ui.chat.collection.get(message.id)?.element;
 
     // Fallback methods if the first one doesn't work
     if (!messageElement) {
@@ -1315,21 +1301,110 @@ Hooks.once("ready", () => {
   const AbilityResultPart = globalThis.ds?.data?.pseudoDocuments?.messageParts?.AbilityResult;
   
   document.addEventListener("click", async (event) => {
+    // Handle Draw Steel 0.11.x PowerRollEffect buttons
+    const applyEffectBtn = event.target.closest('button.apply-effect[data-action="applyEffect"]');
+    if (applyEffectBtn) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      
+      const effectId = applyEffectBtn.dataset.effectId;
+      const effectUuid = applyEffectBtn.dataset.uuid;
+      
+      // Get target tokens (prefer targets over controlled)
+      const controlledTokens = Array.from(canvas?.tokens?.controlled ?? []);
+      const targets = Array.from(game.user.targets);
+      const tokensToUse = targets.length > 0 ? targets : controlledTokens;
+      
+      if (tokensToUse.length === 0) {
+        ui.notifications.warn("Select a target to apply status");
+        return;
+      }
+      
+      // Get source actor (controlled token) for targeted statuses
+      const sourceToken = controlledTokens.length > 0 ? controlledTokens[0] : null;
+      const sourceActorUuid = sourceToken?.actor?.uuid || null;
+      
+      // Check if targeted status
+      const targetedStatuses = ['frightened', 'grabbed', 'taunted'];
+      const isTargetedStatus = targetedStatuses.includes(effectId);
+      
+      // Filter unowned tokens
+      const unownedTokens = tokensToUse.filter(t => !t.actor?.isOwner);
+      
+      if (game.user.isGM || unownedTokens.length === 0) {
+        // Direct apply for owned tokens - call GM handler directly with correct data
+        for (const token of tokensToUse) {
+          const result = await handleGMApplyStatus({
+            token,
+            statusId: effectId,
+            statusName: effectId,
+            effectUuid: effectUuid,
+            sourceActorUuid: isTargetedStatus ? sourceActorUuid : null,
+            sourceActorId: null,
+            sourceItemId: null,
+            sourceItemName: effectId,
+            sourcePlayerName: game.user.name,
+            ability: null,
+            duration: null,
+            eventId: `status-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+          });
+          
+          if (result?.success) {
+            ui.notifications.info(`Applied ${effectId} to ${token.name}`);
+          } else {
+            ui.notifications.error(`Failed: ${result?.error || "Unknown error"}`);
+          }
+        }
+      } else if (socket) {
+        // Route through socket to GM for unowned tokens
+        const gmUser = game.users.find(u => u.isGM && u.active);
+        if (!gmUser) {
+          ui.notifications.warn("No GM available to apply status");
+          return;
+        }
+        
+        for (const token of unownedTokens) {
+          const result = await socket.executeAsGM("applyStatusToTarget", {
+            tokenId: token.id,
+            statusName: effectId,
+            statusId: effectId,
+            effectUuid: effectUuid,
+            sourceActorUuid: isTargetedStatus ? sourceActorUuid : null,
+            sourceActorId: null,
+            sourceItemId: null,
+            sourceItemName: effectId,
+            sourcePlayerName: game.user.name,
+            ability: null,
+            timestamp: Date.now(),
+            duration: null
+          });
+          
+          if (result?.success) {
+            ui.notifications.info(`Applied ${effectId} to ${token.name}`);
+          } else {
+            ui.notifications.error(`Failed: ${result?.error || "Unknown error"}`);
+          }
+        }
+      }
+      return;
+    }
+    
     const statusBtn = event.target.closest('button[data-type="status"]');
     const statusLink = event.target.closest('a[data-type="status"], a[data-type="custom"]');
     
     if (!statusBtn && !statusLink) return;
     
     if (statusLink) {
-      // 0.11.x uses canvas.tokens.controlled, 0.10.x uses game.user.targets
-      // Check controlled tokens first (0.11.x behavior), fallback to targets (0.10.x)
-      const controlledTokens = Array.from(canvas?.tokens?.controlled ?? []);
+      // Prefer targets first, then controlled tokens
       const targets = Array.from(game.user.targets);
+      const controlledTokens = Array.from(canvas?.tokens?.controlled ?? []);
+      const tokensToUse = targets.length > 0 ? targets : controlledTokens;
       
-      // Prefer controlled tokens (0.11.x), fallback to targets (0.10.x)
-      const tokensToUse = controlledTokens.length > 0 ? controlledTokens : targets;
-      
-      if (tokensToUse.length === 0) return;
+      if (tokensToUse.length === 0) {
+        ui.notifications.warn("Select a target to apply status");
+        return;
+      }
       
       const unownedTokens = tokensToUse.filter(t => !t.actor?.isOwner);
       
@@ -1337,8 +1412,43 @@ Hooks.once("ready", () => {
       event.stopPropagation();
       event.stopImmediatePropagation();
       
+      // Get source actor for targeted statuses
+      const sourceToken = controlledTokens.length > 0 ? controlledTokens[0] : null;
+      const sourceActorUuid = sourceToken?.actor?.uuid || null;
+      
+      // Get statusId from either dataset.status or dataset.effectId (0.11.x)
+      const statusId = statusLink.dataset.status || statusLink.dataset.effectId;
+      const effectUuid = statusLink.dataset.uuid;
+      const statusName = statusLink.textContent?.trim() || statusId;
+      
+      // Check if targeted status
+      const targetedStatuses = ['frightened', 'grabbed', 'taunted'];
+      const isTargetedStatus = targetedStatuses.includes(statusId);
+      
       if (game.user.isGM || unownedTokens.length === 0) {
-        await handleEnricherApplyClickDirect(statusLink, tokensToUse);
+        // Direct apply - call handler directly with correct data
+        for (const token of tokensToUse) {
+          const result = await handleGMApplyStatus({
+            token,
+            statusId: statusId,
+            statusName: statusName,
+            effectUuid: effectUuid,
+            sourceActorUuid: isTargetedStatus ? sourceActorUuid : null,
+            sourceActorId: null,
+            sourceItemId: null,
+            sourceItemName: statusName,
+            sourcePlayerName: game.user.name,
+            ability: null,
+            duration: null,
+            eventId: `status-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+          });
+          
+          if (result?.success) {
+            ui.notifications.info(`Applied ${statusName} to ${token.name}`);
+          } else {
+            ui.notifications.error(`Failed: ${result?.error || "Unknown error"}`);
+          }
+        }
       } else {
         await handleEnricherApplyClick(statusLink, unownedTokens);
       }
@@ -1531,6 +1641,7 @@ async function handleGMApplyStatus({
   statusId,
   effectUuid,
   sourceActorId,
+  sourceActorUuid,
   sourceItemId,
   sourceItemName,
   sourcePlayerName,
@@ -1544,9 +1655,7 @@ async function handleGMApplyStatus({
   if (!actualToken && tokenId) {
     actualToken = canvas.tokens.get(tokenId);
   }
-
-  console.log(`[ds-quick-strike] GM-side handler called: tokenId=${tokenId}, token=${token}, actualToken=${actualToken?.id}, statusId=${statusId}, statusName=${statusName}, effectUuid=${effectUuid}, game.user.id=${game.user.id}, game.user.isGM=${game.user.isGM}`);
-
+  
   if (!actualToken) {
     return { success: false, error: "Token not found" };
   }
@@ -1559,6 +1668,51 @@ async function handleGMApplyStatus({
   // Handle custom Active Effects from Draw Steel 0.10.x (UUID-based)
   // These effects use data-uuid instead of data-status in enricher links
   if (effectUuid) {
+    // Handle PowerRollEffect UUIDs - these need special handling for targeted statuses
+    if (effectUuid.includes('.PowerRollEffect.')) {
+      const targetedStatuses = ['frightened', 'grabbed', 'taunted'];
+      const isTargetedStatus = targetedStatuses.includes(statusId);
+      
+      // For targeted statuses, apply using DrawSteelActiveEffect
+      if (isTargetedStatus && sourceActorUuid) {
+        const DrawSteelActiveEffect = globalThis.ds?.documents?.DrawSteelActiveEffect;
+        if (DrawSteelActiveEffect) {
+          const tempEffect = await DrawSteelActiveEffect.fromStatusEffect(statusId);
+          tempEffect.updateSource({
+            transfer: true,
+            origin: effectUuid.split('.PowerRollEffect.')[0]
+          });
+          
+          let effectData = tempEffect.toObject();
+          effectData.changes = effectData.changes || [];
+          effectData.changes.push({
+            key: `system.statuses.${statusId}.sources`,
+            mode: CONST.ACTIVE_EFFECT_MODES.ADD,
+            value: sourceActorUuid
+          });
+          
+          await actor.createEmbeddedDocuments("ActiveEffect", [effectData]);
+          return { success: true, statusName: statusId };
+        }
+      }
+      
+      // For non-targeted statuses, use standard status effect application
+      if (statusId) {
+        const DrawSteelActiveEffect = globalThis.ds?.documents?.DrawSteelActiveEffect;
+        if (DrawSteelActiveEffect) {
+          const tempEffect = await DrawSteelActiveEffect.fromStatusEffect(statusId);
+          tempEffect.updateSource({
+            transfer: true,
+            origin: effectUuid.split('.PowerRollEffect.')[0]
+          });
+          await actor.createEmbeddedDocuments("ActiveEffect", [tempEffect.toObject()]);
+          return { success: true, statusName: statusId };
+        }
+      }
+      
+      return { success: false, error: `Could not apply PowerRollEffect for ${statusId}` };
+    }
+    
     // Validate UUID format - should contain dots and not be empty
     if (!effectUuid || typeof effectUuid !== 'string' || !effectUuid.includes('.')) {
       return { success: false, error: `Invalid effect UUID format: "${effectUuid}"` };
@@ -1577,16 +1731,8 @@ async function handleGMApplyStatus({
         const tempEffect = effectDoc.clone({}, { keepId: false });
         const effectData = tempEffect.toObject();
         
-        console.log(`[ds-quick-strike] GM-side: Creating effect on actor=${actor.name}, effectData=`, effectData);
-        
         // Apply the effect to the actor using standard Foundry method
-        try {
-          await actor.createEmbeddedDocuments("ActiveEffect", [effectData]);
-          console.log(`[ds-quick-strike] GM-side: Successfully created embedded document`);
-        } catch (e) {
-          console.error(`[ds-quick-strike] GM-side: Error creating embedded document:`, e);
-          throw e;
-        }
+        await actor.createEmbeddedDocuments("ActiveEffect", [effectData]);
         
         const generatedEventId = eventId || `status-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         
