@@ -4,6 +4,12 @@ let socket;
 let damageHistory = [];
 const originalTakeDamageMap = new Map();
 
+function detailedLog(...args) {
+  if (game.settings.get(MODULE_ID, 'detailedLogging')) {
+    console.log(`${MODULE_ID}:`, ...args);
+  }
+}
+
 /**
  * Initialize when SocketLib is ready
  */
@@ -68,6 +74,22 @@ Hooks.once('ready', () => {
     default: false
   });
 
+  game.settings.register(MODULE_ID, 'detailedLogging', {
+    name: 'Detailed Logging',
+    hint: 'Enable extensive console logging for troubleshooting purposes',
+    scope: 'world',
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) => {
+      if (value) {
+        ui.notifications.info(`${MODULE_ID}: Detailed logging enabled - check console for output`);
+      } else {
+        ui.notifications.info(`${MODULE_ID}: Detailed logging disabled`);
+      }
+    }
+  });
+
   if (game.user.isGM) {
     hookIntoActorDamage();
   }
@@ -105,12 +127,14 @@ function installApplyEffectOverride() {
   }
 
   AbilityResultPart.ACTIONS.applyEffect = async function(event, target) {
+    detailedLog('[applyEffect ACTION] ENTER');
     event.preventDefault();
     event.stopPropagation();
 
     const statusId = target.dataset.effectId;
     const effectUuid = target.dataset.uuid;
     const statusName = target.textContent.trim();
+    detailedLog('[applyEffect ACTION] parsed target', { statusId, effectUuid, statusName });
 
     const message = this.message;
     let targetTokens = [];
@@ -118,6 +142,7 @@ function installApplyEffectOverride() {
     if (message.system?.targetTokens?.size > 0) {
       const tokenDocs = Array.from(message.system.targetTokens);
       targetTokens = tokenDocs.map(doc => canvas.tokens.get(doc.id)).filter(t => t);
+      detailedLog('[applyEffect ACTION] targetTokens from message', { count: targetTokens.length });
     }
     
     if (!targetTokens.length) {
@@ -227,33 +252,47 @@ function hookIntoActorDamage() {
  * Wrap an actor's takeDamage method to log damage
  */
 function wrapActorTakeDamage(actor) {
-  if (!actor.system.takeDamage) return;
+  detailedLog('[wrapActorTakeDamage] ENTER', { actorId: actor.id, actorName: actor.name });
+  if (!actor.system.takeDamage) {
+    detailedLog('[wrapActorTakeDamage] EXIT - no takeDamage method', { actorId: actor.id });
+    return;
+  }
 
-  if (originalTakeDamageMap.has(actor.id)) return;
+  if (originalTakeDamageMap.has(actor.id)) {
+    detailedLog('[wrapActorTakeDamage] EXIT - already wrapped', { actorId: actor.id });
+    return;
+  }
 
   const originalTakeDamage = actor.system.takeDamage.bind(actor.system);
   originalTakeDamageMap.set(actor.id, originalTakeDamage);
 
   actor.system.takeDamage = async function(amount, options = {}) {
+    detailedLog('[actor.takeDamage] ENTER', { actorId: actor.id, actorName: actor.name, amount, options });
+
     // Actor method guard
     amount = Math.round(parseFloat(amount) || 0);
+    detailedLog('[actor.takeDamage] after parse', { amount });
 
     const preStamina = getStaminaSnapshot(actor);
+    detailedLog('[actor.takeDamage] preStamina', preStamina);
 
     const result = await originalTakeDamage(amount, options);
 
     const postStamina = getStaminaSnapshot(actor);
     const damageType = options.type || 'untyped';
+    detailedLog('[actor.takeDamage] postStamina', postStamina, { damageType, result });
 
     const caller = new Error().stack;
     const isSocketCall = caller.includes('handleGMDamageApplication') ||
                          caller.includes('handleGMHealApplication');
+    detailedLog('[actor.takeDamage] isSocketCall', isSocketCall);
 
     const sourceItemId = options.sourceItemId || null;
     const eventId = `damage-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const sourceActorId = game.user.character?.id || game.user.id;
 
     if (!isSocketCall && amount > 0) {
+      detailedLog('[actor.takeDamage] logging damage to chat', { amount, damageType });
       await logDamageToChat({
         type: 'damage',
         amount: amount,
@@ -272,6 +311,7 @@ function wrapActorTakeDamage(actor) {
       });
     }
 
+    detailedLog('[actor.takeDamage] EXIT', { actorId: actor.id, result });
     return result;
   };
 }
@@ -284,6 +324,8 @@ function installDamageOverride() {
   const originalCallback = OriginalDamageRoll.applyDamageCallback;
 
   OriginalDamageRoll.applyDamageCallback = async function(event) {
+    const startTime = Date.now();
+    detailedLog('[applyDamageCallback] ENTER', { timestamp: startTime });
     try {
       const target = event.currentTarget;
       const li = target.closest("[data-message-id]");
@@ -310,6 +352,7 @@ function installDamageOverride() {
 
       let amount = roll.total;
       const isHalf = event.shiftKey;
+      detailedLog('[applyDamageCallback] roll info', { amount, isHalf, rollTotal: roll.total, rollType: roll.type });
       if (isHalf) {
         amount = Math.floor(amount / 2);
       }
@@ -362,11 +405,17 @@ function installDamageOverride() {
 
       // Always use socket handlers for consistent logging
       if (socket) {
+        detailedLog('[applyDamageCallback] using socket handler');
         await applyDamageViaSocket(targets, roll, amount, sourceActorName, sourceActorId, sourceItemName);
       } else {
+        detailedLog('[applyDamageCallback] using original callback');
         await originalCallback.call(this, event);
       }
+      const elapsed = Date.now() - startTime;
+      detailedLog('[applyDamageCallback] EXIT', { elapsedMs: elapsed });
     } catch (error) {
+      const elapsed = Date.now() - startTime;
+      detailedLog('[applyDamageCallback] ERROR', { elapsedMs: elapsed, error: error.message });
       console.error(`${MODULE_ID}:`, error);
       ui.notifications.error("Failed to apply damage");
     }
@@ -422,11 +471,15 @@ async function checkForSelfDamage(targets, amount, isHeal, moduleId) {
  * Send damage request to GM via socket
  */
 async function applyDamageViaSocket(targets, roll, amount, sourceActorName, sourceActorId, sourceItemName) {
+  detailedLog('[applyDamageViaSocket] ENTER', { targets: targets.map(t => t.name), amount, sourceActorName, sourceItemName, rollType: roll.type, isHeal: roll.isHeal });
   try {
-    for (const target of targets) {
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i];
+      detailedLog('[applyDamageViaSocket] loop iteration', { index: i, total: targets.length, targetName: target.name });
       const eventId = `damage-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
       if (roll.isHeal) {
+        detailedLog('[applyDamageViaSocket] branch: HEAL', { targetId: target.id, targetName: target.name, amount, type: roll.type });
         const result = await socket.executeAsGM('applyHealToTarget', {
           tokenId: target.id,
           amount: amount,
@@ -439,12 +492,14 @@ async function applyDamageViaSocket(targets, roll, amount, sourceActorName, sour
           eventId: eventId
         });
 
+        detailedLog('[applyDamageViaSocket] heal result', { success: result.success, result });
         if (result.success) {
           ui.notifications.info(`Healed ${target.name} for ${amount}`);
         } else {
           ui.notifications.error(`Failed to heal ${target.name}: ${result.error}`);
         }
       } else {
+        detailedLog('[applyDamageViaSocket] branch: DAMAGE', { targetId: target.id, targetName: target.name, amount, type: roll.type, ignoredImmunities: roll.ignoredImmunities });
         const result = await socket.executeAsGM('applyDamageToTarget', {
           tokenId: target.id,
           amount: amount,
@@ -458,6 +513,7 @@ async function applyDamageViaSocket(targets, roll, amount, sourceActorName, sour
           eventId: eventId
         });
 
+        detailedLog('[applyDamageViaSocket] damage result', { success: result.success, result });
         if (result.success) {
           ui.notifications.info(`Damaged ${target.name} for ${amount}`);
         } else {
@@ -514,6 +570,7 @@ function applyStaminaBounds(actor, staminaSnapshot) {
  * GM handler: Apply damage to a target
  */
 async function handleGMDamageApplication({ tokenId, amount, type, ignoredImmunities, sourceActorName, sourceActorId, sourceItemName, sourcePlayerName, sourceItemId, eventId }) {
+  detailedLog('[handleGMDamageApplication] ENTER', { tokenId, amount, type, sourceActorName, sourceItemName });
   if (!game.user.isGM) {
     return { success: false, error: "Unauthorized" };
   }
@@ -574,12 +631,15 @@ async function handleGMDamageApplication({ tokenId, amount, type, ignoredImmunit
       timestamp: Date.now()
     });
 
+    detailedLog('[handleGMDamageApplication] EXIT', { success: true, tokenName: token.name, damageApplied: actualDamage, originalStamina, newStamina });
+
     return {
       success: true,
       tokenName: token.name,
       damageApplied: actualDamage
     };
   } catch (error) {
+    detailedLog('[handleGMDamageApplication] ERROR', error.message);
     console.error(`${MODULE_ID}: GM damage error:`, error);
     return { success: false, error: error.message };
   }
@@ -589,6 +649,7 @@ async function handleGMDamageApplication({ tokenId, amount, type, ignoredImmunit
  * GM handler: Apply healing to a target
  */
 async function handleGMHealApplication({ tokenId, amount, type, sourceActorName, sourceActorId, sourceItemName, sourcePlayerName, sourceItemId, eventId }) {
+  detailedLog('[handleGMHealApplication] ENTER', { tokenId, amount, type, sourceActorName, sourceItemName });
   if (!game.user.isGM) {
     return { success: false, error: "Unauthorized" };
   }
@@ -652,12 +713,15 @@ async function handleGMHealApplication({ tokenId, amount, type, sourceActorName,
       timestamp: Date.now()
     });
 
+    detailedLog('[handleGMHealApplication] EXIT', { success: true, tokenName: token.name, healingApplied: amount, originalStamina, newStamina });
+
     return {
       success: true,
       tokenName: token.name,
       healingApplied: amount
     };
   } catch (error) {
+    detailedLog('[handleGMHealApplication] ERROR', error.message);
     console.error(`${MODULE_ID}: GM healing error:`, error);
     return { success: false, error: error.message };
   }
@@ -1212,29 +1276,35 @@ Hooks.on('renderChatMessageHTML', (message, html) => {
  * Routes through GM relay for unowned tokens
  */
 async function handleEnricherApplyClick(link, tokens) {
+  detailedLog('[handleEnricherApplyClick] ENTER', { tokens: tokens.map(t => t.name) });
   const statusId = link.dataset.status;
   const effectUuid = link.dataset.uuid;
   const end = link.dataset.end;
   const statusName = link.textContent.trim();
+  detailedLog('[handleEnricherApplyClick] parsed link', { statusId, effectUuid, end, statusName });
   
   if (!socket) {
+    detailedLog('[handleEnricherApplyClick] EXIT - no socket');
     ui.notifications.error("Socket not available");
     return;
   }
   
   const gmUser = game.users.find(u => u.isGM && u.active);
   if (!gmUser) {
+    detailedLog('[handleEnricherApplyClick] EXIT - no GM');
     ui.notifications.warn("No GM available to apply status");
     return;
   }
   
   // Validate that we have at least one identifier
   if (!statusId && !effectUuid) {
+    detailedLog('[handleEnricherApplyClick] EXIT - no identifier');
     ui.notifications.error("Unable to apply status: no identifier found");
     return;
   }
   
   for (const token of tokens) {
+    detailedLog('[handleEnricherApplyClick] applying to token', { tokenName: token.name, tokenId: token.id });
     const result = await socket.executeAsGM("applyStatusToTarget", {
       tokenId: token.id,
       statusName,
@@ -1249,6 +1319,7 @@ async function handleEnricherApplyClick(link, tokens) {
       duration: end ? { type: 'draw-steel', label: end, end: { type: end } } : null
     });
     
+    detailedLog('[handleEnricherApplyClick] result', { tokenName: token.name, success: result?.success, result });
     if (result?.success) {
       ui.notifications.info(`Applied ${statusName} to ${token.name}`);
     } else {
@@ -1261,14 +1332,17 @@ async function handleEnricherApplyClick(link, tokens) {
  * Handle enricher apply-effect link clicks for owned tokens (direct application)
  */
 async function handleEnricherApplyClickDirect(link, tokens) {
+  detailedLog('[handleEnricherApplyClickDirect] ENTER', { tokens: tokens.map(t => t.name) });
   const statusId = link.dataset.status;
   const effectUuid = link.dataset.uuid;
   const end = link.dataset.end;
   const statusName = link.textContent.trim();
+  detailedLog('[handleEnricherApplyClickDirect] parsed link', { statusId, effectUuid, end, statusName });
   const eventId = `status-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   const duration = end ? { type: 'draw-steel', label: end, end: { type: end } } : null;
   
   for (const token of tokens) {
+    detailedLog('[handleEnricherApplyClickDirect] applying to token', { tokenName: token.name, tokenId: token.id });
     const result = await handleGMApplyStatus({
       token,
       statusId,
@@ -1283,6 +1357,7 @@ async function handleEnricherApplyClickDirect(link, tokens) {
       eventId
     });
     
+    detailedLog('[handleEnricherApplyClickDirect] result', { tokenName: token.name, success: result?.success, result });
     if (result?.success) {
       ui.notifications.info(`Applied ${statusName} to ${token.name}`);
     } else {
@@ -1650,6 +1725,8 @@ async function handleGMApplyStatus({
   eventId = null,
   timestamp = null
 }) {
+  detailedLog('[handleGMApplyStatus] ENTER', { tokenId, statusName, statusId, effectUuid, sourceActorId, sourceItemName, sourcePlayerName });
+
   // Handle both direct calls (token object) and socket calls (tokenId)
   let actualToken = token;
   if (!actualToken && tokenId) {
@@ -1657,21 +1734,27 @@ async function handleGMApplyStatus({
   }
   
   if (!actualToken) {
+    detailedLog('[handleGMApplyStatus] EXIT - Token not found', { tokenId });
     return { success: false, error: "Token not found" };
   }
   
   const actor = actualToken.actor;
   if (!actor) {
+    detailedLog('[handleGMApplyStatus] EXIT - Actor not found', { tokenId });
     return { success: false, error: "Actor not found" };
   }
+
+  detailedLog('[handleGMApplyStatus] resolved actor', { actorId: actor.id, actorName: actor.name });
 
   // Handle custom Active Effects from Draw Steel 0.10.x (UUID-based)
   // These effects use data-uuid instead of data-status in enricher links
   if (effectUuid) {
+    detailedLog('[handleGMApplyStatus] branch: has effectUuid', { effectUuid });
     // Handle PowerRollEffect UUIDs - these need special handling for targeted statuses
     if (effectUuid.includes('.PowerRollEffect.')) {
       const targetedStatuses = ['frightened', 'grabbed', 'taunted'];
       const isTargetedStatus = targetedStatuses.includes(statusId);
+      detailedLog('[handleGMApplyStatus] branch: PowerRollEffect', { statusId, isTargetedStatus });
       
       // For targeted statuses, apply using DrawSteelActiveEffect
       if (isTargetedStatus && sourceActorUuid) {
@@ -1854,15 +1937,19 @@ async function handleGMApplyStatus({
   }
 
   const existingStatus = CONFIG.statusEffects.find(e => e.id === statusId);
+  detailedLog('[handleGMApplyStatus] branch: standard status', { statusId, existingStatus: !!existingStatus });
 
   if (!existingStatus) {
+    detailedLog('[handleGMApplyStatus] EXIT - Status not found', { statusId });
     return { success: false, error: `Status ${statusId} not found` };
   }
 
   const hasStatus = actor.effects.some(e => e.statuses?.has(statusId));
+  detailedLog('[handleGMApplyStatus] hasStatus', { hasStatus });
 
   if (!hasStatus) {
     const effectEnd = duration?.end?.type || "";
+    detailedLog('[handleGMApplyStatus] toggling status effect', { statusId, effectEnd });
     await actor.toggleStatusEffect(statusId, { active: true, overlay: false, effectEnd: effectEnd });
   }
 
@@ -1927,6 +2014,7 @@ async function handleGMApplyStatus({
     timestamp: timestamp || Date.now()
   });
 
+  detailedLog('[handleGMApplyStatus] EXIT - success', { statusName, statusId, resolvedEffectId });
   return { success: true, statusName: statusName };
 }
 

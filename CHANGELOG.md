@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.5] - 2026-03-14
+## [2.1.6] - 2026-03-14
+
+### Added
+- **Detailed Logging**: New `detailedLogging` module setting that provides extensive console logging for troubleshooting purposes. When enabled, logs function entry/exit points, variable states, loop iterations, and timing information for damage and status application operations.
+
+### Changed
+- **Settings UI**: Added notification feedback when toggling the detailed logging setting
 
 ### Changed
 - **Code Cleanup**: Removed troubleshooting console.log statements from status application handlers
