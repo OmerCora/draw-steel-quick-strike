@@ -176,6 +176,8 @@ function installApplyEffectOverride() {
     for (const token of unownedTokens) {
       const abilityData = await extractAbilityDataFromMessage(message);
       
+      console.log(`[ds-quick-strike] Player-side: About to call socket for token=${token.id}, statusId=${statusId}, effectUuid=${effectUuid}`);
+      
       const result = await socket.executeAsGM("applyStatusToTarget", {
         tokenId: token.id,
         statusName,
@@ -189,6 +191,8 @@ function installApplyEffectOverride() {
         timestamp: Date.now(),
         duration: abilityData?.duration || null
       });
+
+      console.log(`[ds-quick-strike] Player-side: Socket result:`, result);
 
       if (result?.success) {
         ui.notifications.info(`Applied ${statusName} to ${token.name}`);
@@ -1536,6 +1540,8 @@ async function handleGMApplyStatus({
     actualToken = canvas.tokens.get(tokenId);
   }
 
+  console.log(`[ds-quick-strike] GM-side handler called: tokenId=${tokenId}, actualToken=${actualToken?.id}, statusId=${statusId}, effectUuid=${effectUuid}, game.user.isGM=${game.user.isGM}`);
+
   if (!actualToken) {
     return { success: false, error: "Token not found" };
   }
@@ -1561,13 +1567,21 @@ async function handleGMApplyStatus({
         (effectDoc.documentName === 'ActiveEffect' || effectDoc instanceof ActiveEffect);
       
       if (isValidEffect) {
+        console.log(`[ds-quick-strike] GM-side: Creating effect on actor=${actor.name}, effectData=`, effectData);
+        
         // Clone the effect to create a temporary instance (like Draw Steel's native enricher)
         // This preserves all effect properties including duration, flags, etc.
         const tempEffect = effectDoc.clone({}, { keepId: false });
         const effectData = tempEffect.toObject();
         
         // Apply the effect to the actor using standard Foundry method
-        await actor.createEmbeddedDocuments("ActiveEffect", [effectData]);
+        try {
+          await actor.createEmbeddedDocuments("ActiveEffect", [effectData]);
+          console.log(`[ds-quick-strike] GM-side: Successfully created embedded document`);
+        } catch (e) {
+          console.error(`[ds-quick-strike] GM-side: Error creating embedded document:`, e);
+          throw e;
+        }
         
         const generatedEventId = eventId || `status-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         
