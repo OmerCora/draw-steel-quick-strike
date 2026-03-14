@@ -1535,13 +1535,6 @@ async function handleGMApplyStatus({
   if (!actualToken && tokenId) {
     actualToken = canvas.tokens.get(tokenId);
   }
-  
-  
-  
-  if (!game.user.isGM) {
-    ui.notifications.error("Only GM can apply status via socket");
-    return { success: false, error: "GM only" };
-  }
 
   if (!actualToken) {
     return { success: false, error: "Token not found" };
