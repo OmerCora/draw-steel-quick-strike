@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.7] - 2026-03-14
+
+### Fixed
+- **Custom ActiveEffect Application**: Fixed custom ActiveEffects not applying when using PowerRollEffect apply buttons in Draw Steel 0.11.x
+- **Effect Type Detection**: Improved detection of effect type (status effect vs custom ActiveEffect) when `documentName` is undefined
+- **Hook Name**: Fixed typo in `ds-quick-strike:statusUndone` hook (was `ds-quick-strikeStatusUndone`)
+- **Token Error**: Fixed potential null reference error when token is undefined in status application
+- **Installation Feedback**: Added console warning when apply effect override fails to install
+
+### Changed
+- **Fallback Logic**: Added fallback logic to handle effects where `documentName` is undefined by checking item effects and known status lists
+
 ## [2.1.6] - 2026-03-14
 
 ### Added

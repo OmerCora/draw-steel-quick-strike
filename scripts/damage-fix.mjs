@@ -118,6 +118,7 @@ function installApplyEffectOverride() {
     AbilityResultPart = globalThis.ds?.data?.pseudoDocuments?.messageParts?.AbilityResultPart;
   }
   if (!AbilityResultPart) {
+    console.warn(`${MODULE_ID}: Could not install apply effect override - AbilityResult not found. This may be due to an incompatible Draw Steel version. Expected Draw Steel 0.10.x or 0.11.x.`);
     return;
   }
 
@@ -1754,46 +1755,143 @@ async function handleGMApplyStatus({
     if (effectUuid.includes('.PowerRollEffect.')) {
       const targetedStatuses = ['frightened', 'grabbed', 'taunted'];
       const isTargetedStatus = targetedStatuses.includes(statusId);
-      detailedLog('[handleGMApplyStatus] branch: PowerRollEffect', { statusId, isTargetedStatus });
-      
-      // For targeted statuses, apply using DrawSteelActiveEffect
-      if (isTargetedStatus && sourceActorUuid) {
-        const DrawSteelActiveEffect = globalThis.ds?.documents?.DrawSteelActiveEffect;
-        if (DrawSteelActiveEffect) {
-          const tempEffect = await DrawSteelActiveEffect.fromStatusEffect(statusId);
-          tempEffect.updateSource({
+      detailedLog('[handleGMApplyStatus] branch: PowerRollEffect', { statusId, isTargetedStatus, effectUuid });
+
+      // Cache for document resolution to avoid redundant queries in batch operations
+      const powerRollEffectCache = {};
+
+      try {
+        // Resolve the AppliedPowerRollEffect document to determine effect type
+        const resolvedDoc = await fromUuid(effectUuid);
+        if (!resolvedDoc) {
+          detailedLog('[handleGMApplyStatus] Could not resolve AppliedPowerRollEffect', { effectUuid });
+          return { success: false, error: "Could not resolve effect document" };
+        }
+
+        // Check if effect is a status effect or custom ActiveEffect
+        // Draw Steel uses _getEffect to retrieve the effect from the AppliedPowerRollEffect
+        const getEffectMethod = resolvedDoc._getEffect?.bind(resolvedDoc);
+        if (!getEffectMethod) {
+          detailedLog('[handleGMApplyStatus] _getEffect not available on document', { effectUuid });
+          return { success: false, error: "Effect resolution method not available" };
+        }
+
+        const effect = getEffectMethod(statusId);
+        if (!effect) {
+          detailedLog('[handleGMApplyStatus] Effect not found in AppliedPowerRollEffect', { statusId, effectUuid });
+          return { success: false, error: `Effect not found: ${statusId}` };
+        }
+
+        // Determine effect type - check documentName first, then fall back to other methods
+        const effectDocumentName = effect.documentName;
+        
+        // If documentName is available, use it; otherwise check if it's a known targeted status
+        let isStatusEffect = effectDocumentName === 'StatusEffect';
+        let isCustomActiveEffect = effectDocumentName === 'ActiveEffect';
+        
+        // Fallback: if documentName is undefined, check if it's a known targeted status
+        // These are always status effects in Draw Steel
+        if (!effectDocumentName && targetedStatuses.includes(statusId)) {
+          isStatusEffect = true;
+        }
+        
+        // Another fallback: if effect has an id, check if it exists in item's effects
+        if (!effectDocumentName && effect.id) {
+          const item = resolvedDoc.item;
+          const itemEffect = item?.effects?.get(statusId);
+          if (itemEffect) {
+            // It's a custom effect from the item
+            isCustomActiveEffect = true;
+            isStatusEffect = false;
+          } else if (!isStatusEffect) {
+            // Not in item.effects and not a targeted status - try status effect as fallback
+            // Many built-in statuses may not have documentName set properly
+            isStatusEffect = true;
+            isCustomActiveEffect = false;
+          }
+        }
+        
+        detailedLog('[handleGMApplyStatus] Effect type detected', { statusId, documentName: effectDocumentName, isStatusEffect, isCustomActiveEffect, effectId: effect.id });
+
+        // Extract origin from PowerRollEffect UUID prefix
+        const originUuid = effectUuid.split('.PowerRollEffect.')[0];
+
+        // Handle custom ActiveEffects (not status effects)
+        if (isCustomActiveEffect || (!isStatusEffect && effectDocumentName === 'ActiveEffect')) {
+          detailedLog('[handleGMApplyStatus] Applying custom ActiveEffect', { statusId, effectId: effect.id });
+
+          // Get the item from the AppliedPowerRollEffect
+          const item = resolvedDoc.item;
+          if (!item) {
+            detailedLog('[handleGMApplyStatus] Item not found for custom effect', { effectUuid });
+            return { success: false, error: "Source item not found" };
+          }
+
+          // Clone the effect from the item
+          const itemEffect = item.effects?.get(statusId);
+          if (!itemEffect) {
+            detailedLog('[handleGMApplyStatus] Effect not found on item', { statusId, itemId: item.id });
+            return { success: false, error: `Effect not found on item: ${statusId}` };
+          }
+
+          const clonedEffect = itemEffect.clone({}, { keepId: 'noStack', addSource: true });
+          clonedEffect.updateSource({
             transfer: true,
-            origin: effectUuid.split('.PowerRollEffect.')[0]
+            origin: originUuid
           });
-          
-          let effectData = tempEffect.toObject();
-          effectData.changes = effectData.changes || [];
-          effectData.changes.push({
-            key: `system.statuses.${statusId}.sources`,
-            mode: CONST.ACTIVE_EFFECT_MODES.ADD,
-            value: sourceActorUuid
-          });
-          
-          await actor.createEmbeddedDocuments("ActiveEffect", [effectData]);
+
+          // For targeted statuses with source actor
+          if (isTargetedStatus && sourceActorUuid) {
+            let effectData = clonedEffect.toObject();
+            effectData.changes = effectData.changes || [];
+            effectData.changes.push({
+              key: `system.statuses.${statusId}.sources`,
+              mode: CONST.ACTIVE_EFFECT_MODES.ADD,
+              value: sourceActorUuid
+            });
+            await actor.createEmbeddedDocuments("ActiveEffect", [effectData]);
+          } else {
+            await actor.createEmbeddedDocuments("ActiveEffect", [clonedEffect.toObject()]);
+          }
+
           return { success: true, statusName: statusId };
         }
-      }
-      
-      // For non-targeted statuses, use standard status effect application
-      if (statusId) {
-        const DrawSteelActiveEffect = globalThis.ds?.documents?.DrawSteelActiveEffect;
-        if (DrawSteelActiveEffect) {
-          const tempEffect = await DrawSteelActiveEffect.fromStatusEffect(statusId);
-          tempEffect.updateSource({
-            transfer: true,
-            origin: effectUuid.split('.PowerRollEffect.')[0]
-          });
-          await actor.createEmbeddedDocuments("ActiveEffect", [tempEffect.toObject()]);
-          return { success: true, statusName: statusId };
+
+        // Handle built-in status effects using DrawSteelActiveEffect
+        if (isStatusEffect) {
+          const DrawSteelActiveEffect = globalThis.ds?.documents?.DrawSteelActiveEffect;
+          if (DrawSteelActiveEffect) {
+            const tempEffect = await DrawSteelActiveEffect.fromStatusEffect(statusId);
+            tempEffect.updateSource({
+              transfer: true,
+              origin: originUuid
+            });
+
+            // For targeted statuses, add source actor to changes
+            if (isTargetedStatus && sourceActorUuid) {
+              let effectData = tempEffect.toObject();
+              effectData.changes = effectData.changes || [];
+              effectData.changes.push({
+                key: `system.statuses.${statusId}.sources`,
+                mode: CONST.ACTIVE_EFFECT_MODES.ADD,
+                value: sourceActorUuid
+              });
+
+              await actor.createEmbeddedDocuments("ActiveEffect", [effectData]);
+            } else {
+              await actor.createEmbeddedDocuments("ActiveEffect", [tempEffect.toObject()]);
+            }
+            return { success: true, statusName: statusId };
+          }
         }
+
+        return { success: false, error: `Unknown effect type: ${effect.documentName ?? 'undefined'}` };
+
+      } catch (resolveError) {
+        console.error(`${MODULE_ID}: Error resolving PowerRollEffect`, resolveError);
+        detailedLog('[handleGMApplyStatus] Error resolving PowerRollEffect', { effectUuid, error: resolveError.message });
+        return { success: false, error: `Failed to resolve effect: ${resolveError.message}` };
       }
-      
-      return { success: false, error: `Could not apply PowerRollEffect for ${statusId}` };
     }
     
     // Validate UUID format - should contain dots and not be empty
@@ -1880,7 +1978,7 @@ async function handleGMApplyStatus({
                 statusId: statusId,
                 statusUuid: effectUuid,
                 targetName: actor.name,
-                targetTokenId: token.id,
+    targetTokenId: token?.id ?? null,
                 targetActorId: actor.id,
                 sourceActorId: sourceActorId,
                 sourceActorName: sourcePlayerName ?? "Unknown",
@@ -2000,7 +2098,7 @@ async function handleGMApplyStatus({
 
   Hooks.callAll("ds-quick-strike:statusApplied", {
     actorId: actor.id,
-    tokenId: token.id,
+    tokenId: token?.id ?? null,
     statusName: statusName,
     statusId: statusId,
     statusUuid: effectUuid,
@@ -2069,7 +2167,7 @@ async function handleGMUndoStatus(
     });
 
     try {
-      Hooks.callAll("ds-quick-strikeStatusUndone", {
+      Hooks.callAll("ds-quick-strike:statusUndone", {
         actorId: actor.id,
         tokenId: token?.id ?? null,
         statusName: statusName,
@@ -2078,7 +2176,7 @@ async function handleGMUndoStatus(
         timestamp: Date.now()
       });
     } catch (hookError) {
-      console.error(`${MODULE_ID}: Error firing ds-quick-strikeStatusUndone hook`, hookError);
+      console.error(`${MODULE_ID}: Error firing ds-quick-strike:statusUndone hook`, hookError);
     }
 
     return { success: true };
