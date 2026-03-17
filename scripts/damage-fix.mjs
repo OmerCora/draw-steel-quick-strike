@@ -1988,7 +1988,7 @@ async function handleGMApplyStatus({
         
         Hooks.callAll("ds-quick-strike:statusApplied", {
           actorId: actor?.id || null,
-          tokenId: token?.id || null,
+          tokenId: actualToken?.id ?? null,
           statusName: statusName,
           statusId: statusId,
           statusUuid: effectUuid,
@@ -2147,7 +2147,7 @@ async function handleGMApplyStatus({
 
   Hooks.callAll("ds-quick-strike:statusApplied", {
     actorId: actor.id,
-    tokenId: token?.id ?? null,
+    tokenId: actualToken?.id ?? null,
     statusName: statusName,
     statusId: statusId,
     statusUuid: effectUuid,
