@@ -327,6 +327,12 @@ function installDamageOverride() {
   OriginalDamageRoll.applyDamageCallback = async function(event) {
     const startTime = Date.now();
     detailedLog('[applyDamageCallback] ENTER', { timestamp: startTime });
+
+    if (!game.user.isGM) {
+      ui.notifications.warn("Only the GM can apply damage");
+      return;
+    }
+
     try {
       const target = event.currentTarget;
       const li = target.closest("[data-message-id]");
